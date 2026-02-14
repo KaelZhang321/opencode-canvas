@@ -1,0 +1,184 @@
+@import 'tailwindcss';
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  --token-text-primary: #dbe4ff;
+  --token-text-strong: #f8fbff;
+  --token-text-muted: #c2d0f2;
+  --token-accent: #38bdf8;
+  --token-accent-strong: #0ea5e9;
+  --token-on-accent: #0b1220;
+  --token-surface: rgba(15, 23, 42, 0.7);
+  --token-surface-strong: rgba(15, 23, 42, 0.92);
+  --token-border: rgba(148, 163, 184, 0.45);
+  --token-border-strong: rgba(125, 211, 252, 0.8);
+  --token-shadow: rgba(14, 165, 233, 0.35);
+}
+
+:root[data-token-theme='sunset'] {
+  --token-text-primary: #ffe7d6;
+  --token-text-strong: #fff7f0;
+  --token-text-muted: #ffc8aa;
+  --token-accent: #fb7185;
+  --token-accent-strong: #f97316;
+  --token-on-accent: #2d0d07;
+  --token-surface: rgba(51, 26, 22, 0.72);
+  --token-surface-strong: rgba(62, 30, 24, 0.94);
+  --token-border: rgba(251, 113, 133, 0.45);
+  --token-border-strong: rgba(251, 146, 60, 0.82);
+  --token-shadow: rgba(249, 115, 22, 0.35);
+}
+
+:root[data-token-theme='forest'] {
+  --token-text-primary: #dff8e4;
+  --token-text-strong: #f2fff4;
+  --token-text-muted: #b5e8c1;
+  --token-accent: #34d399;
+  --token-accent-strong: #10b981;
+  --token-on-accent: #042018;
+  --token-surface: rgba(7, 33, 24, 0.72);
+  --token-surface-strong: rgba(8, 43, 28, 0.95);
+  --token-border: rgba(52, 211, 153, 0.45);
+  --token-border-strong: rgba(16, 185, 129, 0.82);
+  --token-shadow: rgba(16, 185, 129, 0.35);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: #0b1220;
+  color: #dbe4ff;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* ─── Responsive main grid ─── */
+.oc-main-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.oc-layers-col,
+.oc-inspector-col,
+.oc-ai-col {
+  flex: 0 0 auto;
+  overflow: auto;
+  min-width: 0;
+}
+
+.oc-layers-col {
+  order: 1;
+}
+
+.oc-canvas-col {
+  order: 2;
+  flex: 1 1 0%;
+  min-height: 260px;
+  min-width: 0;
+  position: relative;
+}
+
+.oc-canvas-col>* {
+  position: absolute;
+  inset: 0;
+}
+
+.oc-inspector-col {
+  order: 3;
+}
+
+.oc-ai-col {
+  order: 4;
+}
+
+/* ── Tablet: 2 columns (layers + canvas), rest below ── */
+@media (min-width: 768px) {
+  .oc-main-grid {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: 1fr auto auto;
+  }
+
+  .oc-layers-col {
+    grid-row: 1;
+    grid-column: 1;
+    overflow: auto;
+  }
+
+  .oc-canvas-col {
+    grid-row: 1;
+    grid-column: 2;
+    min-height: 0;
+  }
+
+  .oc-inspector-col {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    max-height: 40vh;
+    overflow: auto;
+  }
+
+  .oc-ai-col {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    max-height: 40vh;
+    overflow: auto;
+  }
+}
+
+/* ── Desktop: 4-column layout (grid-template-columns set by JS inline style) ── */
+@media (min-width: 1280px) {
+  .oc-main-grid {
+    grid-template-rows: 1fr;
+  }
+
+  .oc-layers-col {
+    grid-row: 1;
+    grid-column: 1;
+  }
+
+  .oc-canvas-col {
+    grid-row: 1;
+    grid-column: 2;
+  }
+
+  .oc-inspector-col {
+    grid-row: 1;
+    grid-column: 3;
+    max-height: none;
+  }
+
+  .oc-ai-col {
+    grid-row: 1;
+    grid-column: 4;
+    max-height: none;
+  }
+}
+
+/* ─── Responsive footer grid ─── */
+.oc-footer-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 768px) {
+  .oc-footer-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (min-width: 1280px) {
+  .oc-footer-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
