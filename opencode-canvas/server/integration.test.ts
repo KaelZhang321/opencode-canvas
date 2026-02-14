@@ -15,37 +15,58 @@ function getRandomPort(): number {
   return 30000 + Math.floor(Math.random() * 10000)
 }
 
-function connectClient(port: number): Promise<WebSocket> {
+/**
+ * Buffered WS client that registers `message` listener BEFORE `open` resolves,
+ * preventing the race where messages arrive between `await connect` and
+ * `await waitForMessage`.
+ */
+interface BufferedClient {
+  ws: WebSocket
+  messages: ServerMessage[]
+  waitForCount(count: number, timeout?: number): Promise<void>
+  close(): void
+}
+
+function createClient(port: number): Promise<BufferedClient> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://localhost:${port}`)
-    ws.on('open', () => resolve(ws))
-    ws.on('error', reject)
-  })
-}
-
-function waitForMessage(ws: WebSocket): Promise<ServerMessage> {
-  return new Promise((resolve) => {
-    ws.once('message', (data) => {
-      resolve(JSON.parse(String(data)) as ServerMessage)
-    })
-  })
-}
-
-function waitForMessages(ws: WebSocket, count: number, timeout = 2000): Promise<ServerMessage[]> {
-  return new Promise((resolve, reject) => {
     const messages: ServerMessage[] = []
-    const timer = setTimeout(() => {
-      resolve(messages) // resolve with what we have
-    }, timeout)
-    const handler = (data: unknown) => {
+    const waiters: Array<{ count: number; resolve: () => void }> = []
+
+    ws.on('message', (data) => {
       messages.push(JSON.parse(String(data)) as ServerMessage)
-      if (messages.length >= count) {
-        clearTimeout(timer)
-        ws.off('message', handler)
-        resolve(messages)
+      for (let i = waiters.length - 1; i >= 0; i--) {
+        if (messages.length >= waiters[i].count) {
+          waiters[i].resolve()
+          waiters.splice(i, 1)
+        }
       }
-    }
-    ws.on('message', handler)
+    })
+
+    ws.on('open', () => {
+      resolve({
+        ws,
+        messages,
+        waitForCount(count: number, timeout = 3000): Promise<void> {
+          if (messages.length >= count) return Promise.resolve()
+          return new Promise<void>((res, rej) => {
+            const timer = setTimeout(() => rej(new Error(`Timed out waiting for ${count} messages, got ${messages.length}`)), timeout)
+            waiters.push({
+              count,
+              resolve() {
+                clearTimeout(timer)
+                res()
+              },
+            })
+          })
+        },
+        close() {
+          ws.terminate()
+        },
+      })
+    })
+
+    ws.on('error', reject)
   })
 }
 
@@ -175,118 +196,110 @@ describe('WSBridge integration', () => {
     bridge = new WSBridge(wss, sm)
   })
 
-  afterEach(async () => {
+  afterEach(() => {
     bridge.close()
-    await new Promise<void>((resolve) => {
-      wss.close(() => resolve())
-    })
   })
 
-  it('sends full state on connect', async () => {
-    const ws = await connectClient(port)
-    const msg = await waitForMessage(ws)
-    expect(msg.type).toBe('state:full')
-    expect((msg.payload as EditorState).nodeMap).toEqual({})
-    ws.close()
+  it('sends full state on connect', { timeout: 5000 }, async () => {
+    const c = await createClient(port)
+    await c.waitForCount(1)
+    expect(c.messages[0].type).toBe('state:full')
+    expect((c.messages[0].payload as EditorState).nodeMap).toEqual({})
+    c.close()
   })
 
-  it('broadcasts state:patch when server changes state', async () => {
-    const ws = await connectClient(port)
-    await waitForMessage(ws) // consume initial state:full
+  it('broadcasts state:patch when server changes state', { timeout: 5000 }, async () => {
+    const c = await createClient(port)
+    await c.waitForCount(1) // initial state:full
 
-    const pendingMsg = waitForMessage(ws)
     sm.applyBatch([
       { op: 'add', node: { type: 'text', name: 'Hello', x: 0, y: 0, width: 100, height: 50 } },
     ])
 
-    const msg = await pendingMsg
-    expect(msg.type).toBe('state:patch')
-    ws.close()
+    await c.waitForCount(2) // state:full + state:patch
+    expect(c.messages[1].type).toBe('state:patch')
+    c.close()
   })
 
-  it('receives user:edit from browser client and applies it', async () => {
+  it('receives user:edit from browser client and applies it', { timeout: 5000 }, async () => {
     sm.applyBatch([
       { op: 'add', node: { type: 'button', name: 'B1', x: 0, y: 0, width: 80, height: 40 } },
     ])
     const nodeId = Object.keys(sm.getState().nodeMap)[0]
 
-    const ws = await connectClient(port)
-    await waitForMessage(ws) // consume initial state:full (already includes the node)
+    const c = await createClient(port)
+    await c.waitForCount(1) // initial state:full
 
-    const pendingMsg = waitForMessage(ws)
     const editMsg: ClientMessage = {
       type: 'user:edit',
       payload: {
         command: { type: 'move', payload: { id: nodeId, x: 48, y: 60 } },
       },
     }
-    ws.send(JSON.stringify(editMsg))
+    c.ws.send(JSON.stringify(editMsg))
 
-    const msg = await pendingMsg
-    expect(msg.type).toBe('state:patch')
+    await c.waitForCount(2) // state:full + state:patch from the edit
+    expect(c.messages[1].type).toBe('state:patch')
     expect(sm.getState().nodeMap[nodeId].x).toBe(snap(48))
     expect(sm.getState().nodeMap[nodeId].y).toBe(snap(60))
-    ws.close()
+    c.close()
   })
 
-  it('receives user:selection from browser client', async () => {
+  it('receives user:selection from browser client', { timeout: 5000 }, async () => {
     sm.applyBatch([
       { op: 'add', node: { type: 'text', name: 'S1', x: 0, y: 0, width: 100, height: 50 } },
     ])
     const nodeId = Object.keys(sm.getState().nodeMap)[0]
 
-    const ws = await connectClient(port)
-    await waitForMessage(ws)
+    const c = await createClient(port)
+    await c.waitForCount(1)
 
-    const pendingMsg = waitForMessage(ws)
     const selMsg: ClientMessage = {
       type: 'user:selection',
       payload: { selectedIds: [nodeId] },
     }
-    ws.send(JSON.stringify(selMsg))
+    c.ws.send(JSON.stringify(selMsg))
 
-    await pendingMsg
+    await c.waitForCount(2)
     expect(sm.getState().selectedIds).toContain(nodeId)
-    ws.close()
+    c.close()
   })
 
-  it('multiple clients both receive broadcasts', async () => {
-    const ws1 = await connectClient(port)
-    const ws2 = await connectClient(port)
-    await waitForMessage(ws1) // initial
-    await waitForMessage(ws2) // initial
-
-    const p1 = waitForMessage(ws1)
-    const p2 = waitForMessage(ws2)
+  it('multiple clients both receive broadcasts', { timeout: 5000 }, async () => {
+    const c1 = await createClient(port)
+    const c2 = await createClient(port)
+    await c1.waitForCount(1)
+    await c2.waitForCount(1)
 
     sm.applyBatch([
       { op: 'add', node: { type: 'frame', name: 'F', x: 0, y: 0, width: 200, height: 100 } },
     ])
 
-    const [msg1, msg2] = await Promise.all([p1, p2])
-    expect(msg1.type).toBe('state:patch')
-    expect(msg2.type).toBe('state:patch')
+    await c1.waitForCount(2)
+    await c2.waitForCount(2)
+    expect(c1.messages[1].type).toBe('state:patch')
+    expect(c2.messages[1].type).toBe('state:patch')
 
-    ws1.close()
-    ws2.close()
+    c1.close()
+    c2.close()
   })
 
-  it('client count tracks connected clients', async () => {
+  it('client count tracks connected clients', { timeout: 5000 }, async () => {
     expect(bridge.clientCount).toBe(0)
 
-    const ws1 = await connectClient(port)
-    await waitForMessage(ws1)
+    const c1 = await createClient(port)
+    await c1.waitForCount(1)
     expect(bridge.clientCount).toBe(1)
 
-    const ws2 = await connectClient(port)
-    await waitForMessage(ws2)
+    const c2 = await createClient(port)
+    await c2.waitForCount(1)
     expect(bridge.clientCount).toBe(2)
 
-    ws1.close()
+    c1.close()
     await new Promise((r) => setTimeout(r, 100))
     expect(bridge.clientCount).toBe(1)
 
-    ws2.close()
+    c2.close()
   })
 })
 
@@ -304,26 +317,22 @@ describe('End-to-end: batch_design → WS broadcast', () => {
     bridge = new WSBridge(wss, sm)
   })
 
-  afterEach(async () => {
+  afterEach(() => {
     bridge.close()
-    await new Promise<void>((resolve) => {
-      wss.close(() => resolve())
-    })
   })
 
-  it('full workflow: add nodes → update → delete → undo, client receives all', async () => {
-    const ws = await connectClient(port)
-    await waitForMessage(ws) // initial
+  it('full workflow: add nodes → update → delete → undo, client receives all', { timeout: 8000 }, async () => {
+    const c = await createClient(port)
+    await c.waitForCount(1) // initial state:full
 
-    // 1. Add two nodes
-    let pending = waitForMessages(ws, 2)
+    // 1. Add two nodes (generates 2 state:patch messages)
     sm.applyBatch([
       { op: 'add', node: { type: 'frame', name: 'Container', x: 0, y: 0, width: 400, height: 300 } },
       { op: 'add', node: { type: 'text', name: 'Title', x: 10, y: 10, width: 200, height: 40, text: 'Hello World' } },
     ])
-    let messages = await pending
-    expect(messages).toHaveLength(2)
-    messages.forEach((m) => expect(m.type).toBe('state:patch'))
+    await c.waitForCount(3) // 1 initial + 2 patches
+    expect(c.messages[1].type).toBe('state:patch')
+    expect(c.messages[2].type).toBe('state:patch')
 
     const state = sm.getState()
     const nodeIds = Object.keys(state.nodeMap)
@@ -331,62 +340,54 @@ describe('End-to-end: batch_design → WS broadcast', () => {
 
     // 2. Update a node
     const textNodeId = nodeIds.find((id) => state.nodeMap[id].type === 'text')!
-    pending = waitForMessages(ws, 1)
     sm.applyBatch([
       { op: 'update', nodeId: textNodeId, changes: { text: 'Updated Title' } },
     ])
-    messages = await pending
-    expect(messages).toHaveLength(1)
+    await c.waitForCount(4) // +1 patch
     expect(sm.getState().nodeMap[textNodeId].text).toBe('Updated Title')
 
     // 3. Delete the text node
-    pending = waitForMessages(ws, 1)
     sm.applyBatch([{ op: 'delete', nodeId: textNodeId }])
-    messages = await pending
-    expect(messages).toHaveLength(1)
+    await c.waitForCount(5) // +1 patch
     expect(Object.keys(sm.getState().nodeMap)).toHaveLength(1)
 
-    // 4. Undo → text node returns
-    pending = waitForMessage(ws)
+    // 4. Undo → text node returns (undo broadcasts state:full since commands=[])
     sm.undo()
-    const undoMsg = await pending
-    expect(undoMsg.type).toBe('state:full') // undo broadcasts full state (empty commands)
+    await c.waitForCount(6) // +1 full
+    expect(c.messages[5].type).toBe('state:full')
     expect(Object.keys(sm.getState().nodeMap)).toHaveLength(2)
 
-    ws.close()
+    c.close()
   })
 
-  it('browser edit and server batch interleave correctly', async () => {
-    // Server adds a node
+  it('browser edit and server batch interleave correctly', { timeout: 5000 }, async () => {
     sm.applyBatch([
       { op: 'add', node: { type: 'button', name: 'Btn', x: 0, y: 0, width: 100, height: 40 } },
     ])
     const nodeId = Object.keys(sm.getState().nodeMap)[0]
 
-    const ws = await connectClient(port)
-    await waitForMessage(ws) // initial full state
+    const c = await createClient(port)
+    await c.waitForCount(1) // initial full state
 
     // Browser moves the node
-    let pending = waitForMessage(ws)
     const editMsg: ClientMessage = {
       type: 'user:edit',
       payload: { command: { type: 'move', payload: { id: nodeId, x: 204, y: 300 } } },
     }
-    ws.send(JSON.stringify(editMsg))
-    await pending
+    c.ws.send(JSON.stringify(editMsg))
+    await c.waitForCount(2) // +1 patch from browser edit
 
     expect(sm.getState().nodeMap[nodeId].x).toBe(snap(204))
 
     // Server resizes the same node
-    pending = waitForMessage(ws)
     sm.applyBatch([{ op: 'resize', nodeId, width: 500, height: 200 }])
-    await pending
+    await c.waitForCount(3) // +1 patch from server resize
 
     const finalNode = sm.getState().nodeMap[nodeId]
     expect(finalNode.x).toBe(snap(204))
     expect(finalNode.width).toBe(500)
     expect(finalNode.height).toBe(200)
 
-    ws.close()
+    c.close()
   })
 })
